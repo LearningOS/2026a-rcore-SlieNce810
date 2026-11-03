@@ -14,9 +14,10 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{ MAX_APP_NUM, MAX_SYSCALL_NUM };
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -45,6 +46,9 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    /// Flat table of syscall invocation counts. The count of syscall 'id'
+    /// made by task 'tid' is stored at 'tid *MAX_SYSCALL_NUM + id'
+    syscall_count: Vec<usize>,
 }
 
 lazy_static! {
@@ -59,12 +63,17 @@ lazy_static! {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
         }
+        // 16 * 512 * = 64 KiB, too large for 64 KiB boot stack
+        // so the table lives on the heap
+        let mut syscall_count = Vec::new();
+        syscall_count.resize(MAX_APP_NUM * MAX_SYSCALL_NUM, 0);
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_count,
                 })
             },
         }
@@ -115,6 +124,25 @@ impl TaskManager {
             .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
     }
 
+    /// Record one more invocation of 'syscall_id' by the current task.
+    fn add_syscall_count(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM { return; }
+
+        let mut inner = self.inner.exclusive_access();
+        let index = inner.current_task * MAX_SYSCALL_NUM + syscall_id;
+        inner.syscall_count[index] += 1;
+    }
+
+    /// return how many times the current task has called 'syscall_id'
+    fn get_syscall_count(&self, syscall_id: usize) -> Option<usize> {
+        if syscall_id >= MAX_SYSCALL_NUM  {
+            return None;
+        }
+        let inner = self.inner.exclusive_access();
+        let index = inner.current_task * MAX_SYSCALL_NUM + syscall_id;
+        Some(inner.syscall_count[index])
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -126,10 +154,20 @@ impl TaskManager {
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
+
+            // println!(
+            //     "[SWITCH IN] {} -> {}",
+            //     current,
+            //     next
+            // );
             // before this, we should drop local variables that must be dropped manually
             unsafe {
                 __switch(current_task_cx_ptr, next_task_cx_ptr);
             }
+            // println!(
+            //     "[SWITCH OUT] task {} resumed",
+            //     current,
+            // );
             // go back to user mode
         } else {
             panic!("All applications completed!");
@@ -163,6 +201,17 @@ pub fn suspend_current_and_run_next() {
     mark_current_suspended();
     run_next_task();
 }
+
+/// Record one more invocation of `syscall_id` by the current task.
+pub fn add_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.add_syscall_count(syscall_id);
+}
+
+/// Return how many times the current task has called `syscall_id`.
+pub fn get_syscall_count(syscall_id: usize) -> Option<usize> {
+    TASK_MANAGER.get_syscall_count(syscall_id)
+}
+
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next() {
