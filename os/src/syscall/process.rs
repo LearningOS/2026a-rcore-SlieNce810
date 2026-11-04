@@ -14,6 +14,7 @@ pub struct TimeVal {
 /// task exits and submit an exit code
 pub fn sys_exit(exit_code: i32) -> ! {
     trace!("[kernel] Application exited with code {}", exit_code);
+    crate::task::report_current_task("exit");
     exit_current_and_run_next();
     panic!("Unreachable in sys_exit!");
 }

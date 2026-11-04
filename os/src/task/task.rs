@@ -9,6 +9,16 @@ pub struct TaskControlBlock {
     pub task_status: TaskStatus,
     /// The task context
     pub task_cx: TaskContext,
+    /// Ticks spent in user mode
+    pub user_ticks: usize,
+    /// Ticks spent in kernel mode
+    pub kernel_ticks: usize,
+    /// Tick when the current mode interval started
+    pub mode_start: usize,
+    /// Tick when the task first got the CPU
+    pub first_run: usize,
+    /// Whether the task has ever been scheduled
+    pub started: bool,
 }
 
 /// The status of a task

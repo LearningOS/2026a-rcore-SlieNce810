@@ -15,3 +15,16 @@ extern "C" {
     /// in `current_task_cx_ptr`.
     pub fn __switch(current_task_cx_ptr: *mut TaskContext, next_task_cx_ptr: *const TaskContext);
 }
+
+// 由 switch.S 中的 __switch 直接读写
+#[no_mangle]
+static mut SWITCH_COUNT: usize = 0;
+#[no_mangle]
+static mut SWITCH_TICKS: usize = 0;
+
+/// Return '(switch count, accumulated ticks spent inside __switch)'
+pub fn _switch_stats() -> (usize, usize) {
+    unsafe {
+        (SWITCH_TICKS, SWITCH_COUNT)
+    }
+}
