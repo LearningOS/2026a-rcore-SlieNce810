@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "courseId": 2073,
+  "repository": "LearningOS/2026a-rcore-SlieNce810",
+  "user": "SlieNce810",
+  "totalScore": 500,
+  "chapters": {
+    "ch3": {
+      "points": "7/7",
+      "score": 100,
+      "commit": "7b90bb79ef21d2a91dffb867bc576eb0461be8fe"
+    }
+  },
+  "score": 100,
+  "upload": {
+    "status": "pending",
+    "runId": "41764388082",
+    "runAttempt": "1"
+  }
+}
