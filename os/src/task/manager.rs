@@ -21,9 +21,24 @@ impl TaskManager {
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
         self.ready_queue.push_back(task);
     }
-    /// Take a process out of the ready queue
+    /// Take the ready process with the smallest pass value out of the queue.
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        let mut picked = None;
+        let mut min_pass = usize::MAX;
+        for (i, task) in self.ready_queue.iter().enumerate() {
+            let pass = task.inner_exclusive_access().pass;
+            if pass < min_pass {
+                min_pass = pass;
+                picked = Some(i);
+            }
+        }
+        let idx = picked?;
+        let task = self.ready_queue.remove(idx).unwrap();
+        {
+            let mut inner = task.inner_exclusive_access();
+            inner.pass = inner.pass.wrapping_add(inner.stride);
+        }
+        Some(task)
     }
 }
 
