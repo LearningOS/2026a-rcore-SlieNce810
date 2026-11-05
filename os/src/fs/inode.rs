@@ -37,6 +37,21 @@ impl OSInode {
             inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
         }
     }
+    /// Get the metadata of the inode
+    pub fn stat(&self) -> easy_fs::InodeStat {
+        self.inner.exclusive_access().inode.stat()
+    }
+
+    /// Add a hard link `name` to the inode
+    pub fn link(&self, name: &str) -> bool {
+        self.inner.exclusive_access().inode.link(name)
+    }
+
+    /// Remove the hard link `name` of the inode
+    pub fn unlink(&self, name: &str) -> bool {
+        self.inner.exclusive_access().inode.unlink(name)
+    }
+
     /// read all data from the inode
     pub fn read_all(&self) -> Vec<u8> {
         let mut inner = self.inner.exclusive_access();
@@ -56,6 +71,7 @@ impl OSInode {
 }
 
 lazy_static! {
+    /// Root inode of the file system.
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -131,6 +147,9 @@ impl File for OSInode {
     }
     fn writable(&self) -> bool {
         self.writable
+    }
+    fn stat(&self) -> Option<easy_fs::InodeStat> {
+        Some(OSInode::stat(self))
     }
     fn read(&self, mut buf: UserBuffer) -> usize {
         let mut inner = self.inner.exclusive_access();

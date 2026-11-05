@@ -318,6 +318,34 @@ impl MemorySet {
             false
         }
     }
+
+    /// Whether `[start, start + len)` overlaps any existing area.
+    pub fn is_overlap(&self, start: VirtAddr, len: usize) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = VirtAddr::from(start.0 + len).ceil();
+        self.areas
+            .iter()
+            .any(|area| area.vpn_range.get_start() < end_vpn && start_vpn < area.vpn_range.get_end())
+    }
+
+    /// Remove the area that exactly covers `[start, start + len)`.
+    pub fn remove_area(&mut self, start: VirtAddr, len: usize) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = VirtAddr::from(start.0 + len).ceil();
+        if let Some(area) = self
+            .areas
+            .iter()
+            .find(|area| area.vpn_range.get_start() == start_vpn)
+        {
+            if area.vpn_range.get_end() != end_vpn {
+                return false;
+            }
+            self.remove_area_with_start_vpn(start_vpn);
+            true
+        } else {
+            false
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

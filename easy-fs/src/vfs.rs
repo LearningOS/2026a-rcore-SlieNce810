@@ -6,10 +6,24 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
+
+/// Metadata of an inode
+pub struct InodeStat {
+    /// inode number
+    pub ino: u32,
+    /// file type and mode
+    pub mode: u32,
+    /// number of hard links
+    pub nlink: u32,
+    /// size in bytes
+    pub size: u32,
+}
+
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
     block_id: usize,
     block_offset: usize,
+    inode_id: u32,
     fs: Arc<Mutex<EasyFileSystem>>,
     block_device: Arc<dyn BlockDevice>,
 }
@@ -19,15 +33,119 @@ impl Inode {
     pub fn new(
         block_id: u32,
         block_offset: usize,
+        inode_id: u32,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
     ) -> Self {
         Self {
             block_id: block_id as usize,
             block_offset,
+            inode_id,
             fs,
             block_device,
         }
+    }
+
+    /// Number of directory entries referring to this inode.
+    fn count_links(&self, root: &DiskInode) -> u32 {
+        let file_count = (root.size as usize) / DIRENT_SZ;
+        let mut nlink = 0;
+        for i in 0..file_count {
+            let mut dirent = DirEntry::empty();
+            if root.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device) == DIRENT_SZ
+                && !dirent.name().is_empty()
+                && dirent.inode_id() == self.inode_id
+            {
+                nlink += 1;
+            }
+        }
+        nlink
+    }
+
+    /// Get the metadata of this inode
+    pub fn stat(&self) -> InodeStat {
+        let (is_dir, size) = self.read_disk_inode(|disk_inode| (disk_inode.is_dir(), disk_inode.size));
+        let fs = self.fs.lock();
+        let (root_block, root_offset) = fs.get_disk_inode_pos(0);
+        let nlink = get_block_cache(root_block as usize, Arc::clone(&self.block_device))
+            .lock()
+            .read(root_offset, |root: &DiskInode| self.count_links(root));
+        InodeStat {
+            ino: self.inode_id,
+            mode: if is_dir { 0o040000 } else { 0o100000 },
+            nlink,
+            size,
+        }
+    }
+
+    /// Add a hard link named `name` in the root directory to this inode
+    pub fn link(&self, name: &str) -> bool {
+        let mut fs = self.fs.lock();
+        let (root_block, root_offset) = fs.get_disk_inode_pos(0);
+        let success = get_block_cache(root_block as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(root_offset, |root: &mut DiskInode| {
+                if self.find_inode_id(name, root).is_some() {
+                    return false;
+                }
+                let file_count = (root.size as usize) / DIRENT_SZ;
+                let new_size = ((file_count + 1) * DIRENT_SZ) as u32;
+                let blocks_needed = root.blocks_num_needed(new_size);
+                let mut new_blocks = Vec::new();
+                for _ in 0..blocks_needed {
+                    new_blocks.push(fs.alloc_data());
+                }
+                root.increase_size(new_size, new_blocks, &self.block_device);
+                let dirent = DirEntry::new(name, self.inode_id);
+                root.write_at(file_count * DIRENT_SZ, dirent.as_bytes(), &self.block_device);
+                true
+            });
+        block_cache_sync_all();
+        success
+    }
+
+    /// Remove the hard link `name` from the root directory
+    pub fn unlink(&self, name: &str) -> bool {
+        let (success, remaining) = {
+            let fs = self.fs.lock();
+            let (root_block, root_offset) = fs.get_disk_inode_pos(0);
+            get_block_cache(root_block as usize, Arc::clone(&self.block_device))
+                .lock()
+                .modify(root_offset, |root: &mut DiskInode| {
+                    let file_count = (root.size as usize) / DIRENT_SZ;
+                    let mut found = false;
+                    for i in 0..file_count {
+                        let mut dirent = DirEntry::empty();
+                        if root.read_at(
+                            i * DIRENT_SZ,
+                            dirent.as_bytes_mut(),
+                            &self.block_device,
+                        ) == DIRENT_SZ
+                            && dirent.name() == name
+                        {
+                            found = true;
+                            let empty = DirEntry::empty();
+                            root.write_at(
+                                i * DIRENT_SZ,
+                                empty.as_bytes(),
+                                &self.block_device,
+                            );
+                            break;
+                        }
+                    }
+                    if !found {
+                        return (false, 0);
+                    }
+                    (true, self.count_links(root))
+                })
+        };
+        if success && remaining == 0 {
+            self.clear();
+            let mut fs = self.fs.lock();
+            fs.dealloc_inode(self.inode_id);
+            block_cache_sync_all();
+        }
+        success
     }
     /// Call a function over a disk inode to read it
     fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
@@ -67,6 +185,7 @@ impl Inode {
                 Arc::new(Self::new(
                     block_id,
                     block_offset,
+                    inode_id,
                     self.fs.clone(),
                     self.block_device.clone(),
                 ))
@@ -133,6 +252,7 @@ impl Inode {
         Some(Arc::new(Self::new(
             block_id,
             block_offset,
+            new_inode_id,
             self.fs.clone(),
             self.block_device.clone(),
         )))
@@ -150,7 +270,9 @@ impl Inode {
                     disk_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device,),
                     DIRENT_SZ,
                 );
-                v.push(String::from(dirent.name()));
+                if !dirent.name().is_empty() {
+                    v.push(String::from(dirent.name()));
+                }
             }
             v
         })
