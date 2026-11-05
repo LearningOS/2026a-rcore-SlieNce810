@@ -14,7 +14,9 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::MapPermission;
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -133,6 +135,52 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Record one invocation of `syscall_id` by the current task.
+    fn add_syscall_count(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].syscall_count[syscall_id] += 1;
+    }
+
+    /// Return how many times the current task has called `syscall_id`.
+    fn get_syscall_count(&self, syscall_id: usize) -> Option<usize> {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return None;
+        }
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        Some(inner.tasks[cur].syscall_count[syscall_id] as usize)
+    }
+
+    /// Map `[start, start + len)` with `port` permissions for the current task.
+    fn mmap(&self, start: usize, len: usize, port: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let task = &mut inner.tasks[cur];
+        if task.memory_set.is_overlap(start.into(), len) {
+            return -1;
+        }
+        let permission =
+            MapPermission::from_bits(((port as u8) << 1) | MapPermission::U.bits()).unwrap();
+        task.memory_set
+            .insert_framed_area(start.into(), (start + len).into(), permission);
+        0
+    }
+
+    /// Unmap `[start, start + len)` of the current task.
+    fn munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        if inner.tasks[cur].memory_set.remove_area(start.into(), len) {
+            0
+        } else {
+            -1
+        }
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +249,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Record one syscall invocation of the current task.
+pub fn add_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.add_syscall_count(syscall_id);
+}
+
+/// Return how many times the current task has called `syscall_id`.
+pub fn get_syscall_count(syscall_id: usize) -> Option<usize> {
+    TASK_MANAGER.get_syscall_count(syscall_id)
+}
+
+/// Map `[start, start + len)` with `port` permissions for the current task.
+pub fn mmap(start: usize, len: usize, port: usize) -> isize {
+    TASK_MANAGER.mmap(start, len, port)
+}
+
+/// Unmap `[start, start + len)` of the current task.
+pub fn munmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.munmap(start, len)
 }

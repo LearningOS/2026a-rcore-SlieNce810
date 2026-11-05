@@ -1,6 +1,7 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::config::PAGE_SIZE;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -178,4 +179,57 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+
+/// Read one byte from user virtual address `ptr` if it is mapped and readable.
+pub fn user_read_u8(token: usize, ptr: usize) -> Option<u8> {
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(ptr);
+    let pte = page_table.translate(va.floor())?;
+    if !pte.is_valid() || !pte.readable() || (pte.flags() & PTEFlags::U) == PTEFlags::empty() {
+        return None;
+    }
+    Some(pte.ppn().get_bytes_array()[va.page_offset()])
+}
+
+/// Write one byte to user virtual address `ptr` if it is mapped and writable.
+pub fn user_write_u8(token: usize, ptr: usize, value: u8) -> bool {
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(ptr);
+    match page_table.translate(va.floor()) {
+        Some(pte)
+            if pte.is_valid()
+                && pte.writable()
+                && (pte.flags() & PTEFlags::U) != PTEFlags::empty() =>
+        {
+            pte.ppn().get_bytes_array()[va.page_offset()] = value;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Copy `data` to user virtual address `ptr`, checking every page is writable.
+pub fn user_write_bytes(token: usize, ptr: usize, data: &[u8]) -> bool {
+    let page_table = PageTable::from_token(token);
+    let mut written = 0;
+    while written < data.len() {
+        let va = VirtAddr::from(ptr + written);
+        let pte = match page_table.translate(va.floor()) {
+            Some(pte)
+                if pte.is_valid()
+                    && pte.writable()
+                    && (pte.flags() & PTEFlags::U) != PTEFlags::empty() =>
+            {
+                pte
+            }
+            _ => return false,
+        };
+        let offset = va.page_offset();
+        let n = core::cmp::min(PAGE_SIZE - offset, data.len() - written);
+        pte.ppn().get_bytes_array()[offset..offset + n]
+            .copy_from_slice(&data[written..written + n]);
+        written += n;
+    }
+    true
 }
