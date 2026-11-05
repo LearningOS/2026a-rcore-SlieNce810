@@ -47,9 +47,25 @@ impl OSInode {
         }
         v
     }
+
+    /// Get the metadata of the inode
+    pub fn stat(&self) -> easy_fs::InodeStat {
+        self.inner.exclusive_access().inode.stat()
+    }
+
+    /// Add a hard link `name` to the inode
+    pub fn link(&self, name: &str) -> bool {
+        self.inner.exclusive_access().inode.link(name)
+    }
+
+    /// Remove the hard link `name` of the inode
+    pub fn unlink(&self, name: &str) -> bool {
+        self.inner.exclusive_access().inode.unlink(name)
+    }
 }
 
 lazy_static! {
+    /// Root inode of the file system.
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -128,6 +144,9 @@ impl File for OSInode {
     /// file writable?
     fn writable(&self) -> bool {
         self.writable
+    }
+    fn stat(&self) -> Option<easy_fs::InodeStat> {
+        Some(OSInode::stat(self))
     }
     /// read file data into buffer
     fn read(&self, mut buf: UserBuffer) -> usize {

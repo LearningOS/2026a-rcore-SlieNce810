@@ -1,5 +1,6 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::config::PAGE_SIZE;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -215,6 +216,31 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
+}
+
+/// Copy `data` to user virtual address `ptr`, checking every page is user-writable.
+pub fn user_write_bytes(token: usize, ptr: usize, data: &[u8]) -> bool {
+    let page_table = PageTable::from_token(token);
+    let mut written = 0;
+    while written < data.len() {
+        let va = VirtAddr::from(ptr + written);
+        let pte = match page_table.translate(va.floor()) {
+            Some(pte)
+                if pte.is_valid()
+                    && pte.writable()
+                    && (pte.flags() & PTEFlags::U) != PTEFlags::empty() =>
+            {
+                pte
+            }
+            _ => return false,
+        };
+        let offset = va.page_offset();
+        let n = core::cmp::min(PAGE_SIZE - offset, data.len() - written);
+        pte.ppn().get_bytes_array()[offset..offset + n]
+            .copy_from_slice(&data[written..written + n]);
+        written += n;
+    }
+    true
 }
 
 /// An abstraction over a buffer passed from user space to kernel space

@@ -41,6 +41,24 @@ impl Semaphore {
         }
     }
 
+    /// down operation with deadlock detection;
+    /// returns false when a deadlock is reported.
+    pub fn down_or_deadlock(&self) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        if inner.count > 0 {
+            inner.count -= 1;
+            return true;
+        }
+        if crate::sync::deadlock_detect_enabled() {
+            return false;
+        }
+        inner.count -= 1;
+        inner.wait_queue.push_back(current_task().unwrap());
+        drop(inner);
+        block_current_and_run_next();
+        true
+    }
+
     /// down operation of semaphore
     pub fn down(&self) {
         trace!("kernel: Semaphore::down");
