@@ -61,6 +61,11 @@ pub fn get_num_app() -> usize {
     unsafe { (_num_app as usize as *const usize).read_volatile() }
 }
 
+/// Get the top of the kernel stack reserved for task 'task_id'
+pub fn kernel_stack_top(task_id: usize) -> usize {
+    KERNEL_STACK[task_id].get_sp()
+}
+
 /// Load nth user app at
 /// [APP_BASE_ADDRESS + n * APP_SIZE_LIMIT, APP_BASE_ADDRESS + (n+1) * APP_SIZE_LIMIT).
 pub fn load_apps() {

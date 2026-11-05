@@ -15,14 +15,66 @@ mod switch;
 mod task;
 
 use crate::config::{ MAX_APP_NUM, MAX_SYSCALL_NUM };
-use crate::loader::{get_num_app, init_app_cx};
+use crate::loader::{get_num_app, init_app_cx, kernel_stack_top};
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
+use riscv::register::sstatus;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+
+/// Number of kernel tasks created at boot
+const KERNEL_TASK_NUM: usize = 2;
+
+/// A kernel task: busy-watis so that timer
+extern "C" fn kernel_task_a() -> ! {
+    // First entry leaves __switch with SIE=0; enable interrupts.
+    unsafe {
+        sstatus::set_sie();
+    }
+    for round in 0..4 {
+        let start = crate::timer::get_time_us();
+        while crate::timer::get_time_us() - start < 30_000 {
+            core::hint::spin_loop();
+        }
+        println!(
+            "[kernel task A] round {} (kernel timer irq = {})",
+            round,
+            crate::trap::kernel_timer_count()
+        );
+        suspend_current_and_run_next();
+    }
+    report_current_task("kernel task A exit");
+    exit_current_and_run_next();
+    panic!("kernel task A should not return");
+}
+
+/// Another kernel task, with a shorter busy interval
+extern "C" fn kernel_task_b() -> ! {
+    unsafe {
+        sstatus::set_sie();
+    }
+    for round in 0..4 {
+        let start = crate::timer::get_time_us();
+        while crate::timer::get_time_us() - start < 20_000 {
+            core::hint::spin_loop();
+        }
+        println!(
+            "[kernel task B] round {} (kernel timer irq = {})",
+            round,
+            crate::trap::kernel_timer_count()
+        );
+        suspend_current_and_run_next();
+    }
+    report_current_task("kernel task B exit");
+    exit_current_and_run_next();
+    panic!("kernel task B should not return");
+}
+
+const KERNEL_TASK_ENTRIES: [extern "C" fn() -> !; KERNEL_TASK_NUM] =
+    [kernel_task_a, kernel_task_b];
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -34,8 +86,8 @@ pub use context::TaskContext;
 /// borrowing checks to runtime. You can see examples on how to use `inner` in
 /// existing functions on `TaskManager`.
 pub struct TaskManager {
-    /// total number of tasks
-    num_app: usize,
+    /// total number of tasks (user apps + kernel tasks)
+    num_tasks: usize,
     /// use inner value to get mutable access
     inner: UPSafeCell<TaskManagerInner>,
 }
@@ -48,13 +100,15 @@ pub struct TaskManagerInner {
     current_task: usize,
     /// Flat table of syscall invocation counts. The count of syscall 'id'
     /// made by task 'tid' is stored at 'tid *MAX_SYSCALL_NUM + id'
-    syscall_count: Vec<usize>,
+    syscall_count: Vec<u32>,
 }
 
 lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
+        let num_tasks = num_app + KERNEL_TASK_NUM;
+        assert!(num_tasks <= MAX_APP_NUM, "too many tasks");
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
@@ -65,15 +119,25 @@ lazy_static! {
             started: false,
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
-            task.task_cx = TaskContext::goto_restore(init_app_cx(i));
-            task.task_status = TaskStatus::Ready;
+            if i < num_app {
+                // user task: first run enters through __restore
+                task.task_cx = TaskContext::goto_restore(init_app_cx(i));
+                task.task_status = TaskStatus::Ready;
+            } else if i < num_tasks {
+                // kernel task: __switch rets directly into its entry
+                task.task_cx = TaskContext::goto_kernel(
+                    kernel_stack_top(i),
+                    KERNEL_TASK_ENTRIES[i - num_app] as usize,
+                );
+                task.task_status = TaskStatus::Ready;
+            }
         }
-        // 16 * 512 * = 64 KiB, too large for 64 KiB boot stack
-        // so the table lives on the heap
+        // 20 * 512 * 8 = 80 KiB, too large for the 64 KiB boot stack,
+        // so the table lives on the heap.
         let mut syscall_count = Vec::new();
         syscall_count.resize(MAX_APP_NUM * MAX_SYSCALL_NUM, 0);
         TaskManager {
-            num_app,
+            num_tasks,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
@@ -129,8 +193,8 @@ impl TaskManager {
     fn find_next_task(&self) -> Option<usize> {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        (current + 1..current + self.num_app + 1)
-            .map(|id| id % self.num_app)
+        (current + 1..current + self.num_tasks + 1)
+            .map(|id| id % self.num_tasks)
             .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
     }
 
@@ -150,16 +214,23 @@ impl TaskManager {
         }
         let inner = self.inner.exclusive_access();
         let index = inner.current_task * MAX_SYSCALL_NUM + syscall_id;
-        Some(inner.syscall_count[index])
+        Some(inner.syscall_count[index] as usize)
     }
 
-    /// Account the user-mode interval that ends when a trap is taken
-    fn on_trap_entry(&self) {
-        let mut _inner = self.inner.exclusive_access();
-        let current = _inner.current_task;
+    /// Account the interval that ends when a trap is taken.
+    ///
+    /// `from_user` tells whether the interrupted context was user mode or
+    /// supervisor mode (nested interrupt).
+    fn on_trap_entry(&self, from_user: bool) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
         let now = crate::timer::get_time();
-        let task = &mut _inner.tasks[current];
-        task.kernel_ticks += now - task.mode_start;
+        let task = &mut inner.tasks[current];
+        if from_user {
+            task.user_ticks += now - task.mode_start;
+        } else {
+            task.kernel_ticks += now - task.mode_start;
+        }
         task.mode_start = now;
     }
 
@@ -203,6 +274,10 @@ impl TaskManager {
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
+        // Update task state and call __switch atomically.
+        unsafe {
+            sstatus::clear_sie();
+        }
         if let Some(next) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
@@ -230,6 +305,8 @@ impl TaskManager {
             // before this, we should drop local variables that must be dropped manually
             unsafe {
                 __switch(current_task_cx_ptr, next_task_cx_ptr);
+                // resumed: restore the kernel interrupt state
+                sstatus::set_sie();
             }
             // go back to user mode
         } else {
@@ -240,13 +317,14 @@ impl TaskManager {
 
     /// Print how many task switches happened and their average cost.
     pub fn print_switch_stats() {
-        let (count, ticks) = switch::_switch_stats();
+        let (count, ticks) = switch::switch_stats();
         if count == 0 { return; }
-        let avg_ticks = ticks / count;
-        let avg_ns = avg_ticks as u128 * 1_000_000_000 / crate::config::CLOCK_FREQ as u128;
+        let avg_milli = ticks * 1000 / count;
+        let avg_ns = ticks as u128 * 1_000_000_000
+            / (count as u128 * crate::config::CLOCK_FREQ as u128);
         println!(
-            "[switch] count = {}, total = {} ticks, average = {} ticks (~{} ns)",
-            count, ticks, avg_ticks, avg_ns
+            "[switch] count = {}, total = {} ticks, average = {}.{:03} ticks (~{} ns)",
+            count, ticks, avg_milli / 1000, avg_milli % 1000, avg_ns
         );
     }
 }
@@ -274,8 +352,14 @@ fn mark_current_exited() {
 
 /// Suspend the current 'Running' task and run the next task in task list.
 pub fn suspend_current_and_run_next() {
+    unsafe {
+        sstatus::clear_sie();
+    }
     mark_current_suspended();
     run_next_task();
+    unsafe {
+        sstatus::set_sie();
+    }
 }
 
 /// Record one more invocation of `syscall_id` by the current task.
@@ -288,9 +372,9 @@ pub fn get_syscall_count(syscall_id: usize) -> Option<usize> {
     TASK_MANAGER.get_syscall_count(syscall_id)
 }
 
-/// Account the user-mode interval that ends when a trap is taken.
-pub fn on_trap_entry() {
-    TASK_MANAGER.on_trap_entry();
+/// Account the interval that ends when a trap is taken.
+pub fn on_trap_entry(from_user: bool) {
+    TASK_MANAGER.on_trap_entry(from_user);
 }
 
 /// Account the kernel-mode interval that ends when a trap returns.
@@ -306,6 +390,9 @@ pub fn report_current_task(reason: &str) {
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next() {
+    unsafe {
+        sstatus::clear_sie();
+    }
     mark_current_exited();
     run_next_task();
 }

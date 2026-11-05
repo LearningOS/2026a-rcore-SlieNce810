@@ -18,13 +18,24 @@ use crate::syscall::syscall;
 use crate::task::{exit_current_and_run_next, suspend_current_and_run_next};
 use crate::timer::set_next_trigger;
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use riscv::register::{
     mtvec::TrapMode,
     scause::{self, Exception, Interrupt, Trap},
-    sie, stval, stvec,
+    sie,
+    sstatus::{self, SPP},
+    stval, stvec,
 };
 
 global_asm!(include_str!("trap.S"));
+
+/// Timer interrupts taken while the kernel itself was running.
+static KERNEL_TIMER_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Return how many timer interrupts arrived while the kernel was running.
+pub fn kernel_timer_count() -> usize {
+    KERNEL_TIMER_COUNT.load(Ordering::Relaxed)
+}
 
 /// Initialize trap handling
 pub fn init() {
@@ -48,8 +59,28 @@ pub fn enable_timer_interrupt() {
 pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
     let scause = scause::read(); // get trap cause
     let stval = stval::read(); // get extra value
-                               // trace!("into {:?}", scause.cause());
-    crate::task::on_trap_entry();
+
+    // Whether this trap interrupted user mode or supervisor mode.
+    let from_user = cx.sstatus.spp() == SPP::User;
+
+    // A timer interrupt stays pending until the next trigger is programmed.
+    // Acknowledge it *before* enabling interrupts, otherwise the handler
+    // re-enters itself on the very next instruction.
+    if matches!(
+        scause.cause(),
+        Trap::Interrupt(Interrupt::SupervisorTimer)
+    ) {
+        set_next_trigger();
+    }
+
+    crate::task::on_trap_entry(from_user);
+
+    // Now that the trap frame is complete, allow nested interrupts while
+    // handling the trap.
+    unsafe {
+        sstatus::set_sie();
+    }
+
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
             // jump to next instruction anyway
@@ -68,7 +99,9 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
             exit_current_and_run_next();
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            set_next_trigger();
+            if !from_user {
+                KERNEL_TIMER_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
             suspend_current_and_run_next();
         }
         _ => {
@@ -80,6 +113,10 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
         }
     }
     crate::task::on_trap_exit();
+    // __restore will restore SIE from the saved sstatus.
+    unsafe {
+        sstatus::clear_sie();
+    }
     cx
 }
 

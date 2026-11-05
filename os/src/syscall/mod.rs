@@ -20,6 +20,8 @@ const SYSCALL_YIELD: usize = 124;
 const SYSCALL_GET_TIME: usize = 169;
 /// trace syscall
 const SYSCALL_TRACE: usize = 410;
+/// busy-wait in kernel mode (for observing kernel-mode interrupts)
+const SYSCALL_KERNEL_BUSY: usize = 500;
 
 mod fs;
 mod process;
@@ -37,6 +39,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_TRACE => sys_trace(args[0], args[1], args[2]),
+        SYSCALL_KERNEL_BUSY => sys_kernel_busy(args[0]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

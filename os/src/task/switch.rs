@@ -22,9 +22,7 @@ static mut SWITCH_COUNT: usize = 0;
 #[no_mangle]
 static mut SWITCH_TICKS: usize = 0;
 
-/// Return '(switch count, accumulated ticks spent inside __switch)'
-pub fn _switch_stats() -> (usize, usize) {
-    unsafe {
-        (SWITCH_TICKS, SWITCH_COUNT)
-    }
+/// Return `(switch count, accumulated ticks spent inside __switch)`.
+pub fn switch_stats() -> (usize, usize) {
+    unsafe { (SWITCH_COUNT, SWITCH_TICKS) }
 }

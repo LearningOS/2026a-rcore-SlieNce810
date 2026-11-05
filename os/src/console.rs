@@ -14,7 +14,18 @@ impl Write for Stdout {
 }
 
 pub fn print(args: fmt::Arguments) {
+    // Keep one print atomic: a nested timer interrupt must not interleave
+    // characters of two different prints.
+    let sie = riscv::register::sstatus::read().sie();
+    unsafe {
+        riscv::register::sstatus::clear_sie();
+    }
     Stdout.write_fmt(args).unwrap();
+    if sie {
+        unsafe {
+            riscv::register::sstatus::set_sie();
+        }
+    }
 }
 
 /// Print! to the host console using the format string and arguments.

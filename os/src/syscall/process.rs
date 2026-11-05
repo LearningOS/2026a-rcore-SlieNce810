@@ -39,7 +39,17 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
-// TODO: implement the syscall
+/// Busy-wait in kernel mode for `ms` milliseconds, then return how many
+/// timer interrupts arrived while the kernel was running.
+pub fn sys_kernel_busy(ms: usize) -> isize {
+    trace!("kernel: sys_kernel_busy");
+    let start = get_time_us();
+    let end = start + ms * 1000;
+    while get_time_us() < end {
+        core::hint::spin_loop();
+    }
+    crate::trap::kernel_timer_count() as isize
+}
 
 pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");

@@ -32,4 +32,14 @@ impl TaskContext {
             s: [0; 12],
         }
     }
+
+    /// Create a context for a kernel task
+    /// '__switch' restores it and 'ret' jumps to 'entry' whit 'sp = kstack_top'
+    pub fn goto_kernel(kstack_top: usize, entry: usize) -> Self {
+        Self {
+            ra: entry,
+            sp: kstack_top,
+            s: [0; 12],
+        }
+    }
 }
