@@ -16,6 +16,9 @@ use alloc::{
 };
 use core::cell::RefMut;
 
+/// Base stride value used by the stride scheduler.
+pub const BIG_STRIDE: usize = 1 << 20;
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -87,6 +90,15 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Scheduling priority, at least 2
+    pub priority: usize,
+
+    /// Stride value derived from priority
+    pub stride: usize,
+
+    /// Accumulated pass value
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -158,6 +170,9 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: BIG_STRIDE / 16,
+                    pass: 0,
                 })
             },
         };
@@ -273,6 +288,9 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                 })
             },
         });

@@ -26,7 +26,7 @@ use lazy_static::*;
 use manager::fetch_task;
 use manager::remove_from_pid2task;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, BIG_STRIDE};
 
 pub use action::{SignalAction, SignalActions};
 pub use manager::{add_task, pid2task};

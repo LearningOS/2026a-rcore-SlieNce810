@@ -1,6 +1,8 @@
 //! File and filesystem-related syscalls
-use crate::fs::{make_pipe, open_file, OpenFlags, Stat};
-use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
+use crate::fs::{make_pipe, open_file, OpenFlags, Stat, StatMode, ROOT_INODE};
+use crate::mm::{
+    translated_byte_buffer, translated_refmut, translated_str, user_write_bytes, UserBuffer,
+};
 use crate::task::{current_task, current_user_token};
 use alloc::sync::Arc;
 
@@ -106,20 +108,73 @@ pub fn sys_dup(fd: usize) -> isize {
     new_fd as isize
 }
 
-/// YOUR JOB: Implement fstat.
-pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
-    trace!("kernel:pid[{}] sys_fstat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+/// Get the metadata of an open file
+pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
+    trace!("kernel:pid[{}] sys_fstat", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    let file = match &inner.fd_table[fd] {
+        Some(file) => file.clone(),
+        None => return -1,
+    };
+    drop(inner);
+    match file.stat() {
+        Some(kstat) => {
+            let mode = if kstat.mode == 0o040000 {
+                StatMode::DIR
+            } else {
+                StatMode::FILE
+            };
+            let stat = Stat::new(0, kstat.ino as u64, mode, kstat.nlink);
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &stat as *const Stat as *const u8,
+                    core::mem::size_of::<Stat>(),
+                )
+            };
+            if user_write_bytes(token, st as usize, bytes) {
+                0
+            } else {
+                -1
+            }
+        }
+        None => -1,
+    }
 }
 
-/// YOUR JOB: Implement linkat.
-pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+/// Create a hard link `new_name` for `old_name`
+pub fn sys_linkat(old_name: *const u8, new_name: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_linkat", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let old_name = translated_str(token, old_name);
+    let new_name = translated_str(token, new_name);
+    if let Some(inode) = ROOT_INODE.find(old_name.as_str()) {
+        if inode.link(new_name.as_str()) {
+            0
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
 }
 
-/// YOUR JOB: Implement unlinkat.
-pub fn sys_unlinkat(_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+/// Remove the directory entry `name`
+pub fn sys_unlinkat(name: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_unlinkat", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let name = translated_str(token, name);
+    if let Some(inode) = ROOT_INODE.find(name.as_str()) {
+        if inode.unlink(name.as_str()) {
+            0
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
 }
